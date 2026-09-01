@@ -158,7 +158,21 @@ jobs:
           echo "  Image: $IMAGE_REF:$COMMIT_SHA"
           echo "  Note: Dokploy will run 'docker compose pull && docker compose up -d' — ensure compose file uses image: $IMAGE_REF:latest (or :$COMMIT_SHA) and registry is accessible."
 
-          HTTP_CODE=$(curl -sS -o /tmp/resp.json -w "%{http_code}" \
+          case "$DOKPLOY_URL" in
+            https://*) ;;
+            http://*)
+              echo "::error::DOKPLOY_URL uses http://. A TLS-terminating proxy (Cloudflare, Traefik) will answer with a redirect to https:// instead of reaching the API. Set the secret to the https:// URL."
+              exit 1 ;;
+            *)
+              echo "::error::DOKPLOY_URL must start with https:// (got a value that does not). Set it to e.g. https://dokploy.example.com with no trailing slash or path."
+              exit 1 ;;
+          esac
+
+          # No -L here, deliberately. curl would replay the request at the
+          # redirect target and carry x-api-key with it, handing the Dokploy
+          # token to whatever host the redirect points at (a Cloudflare Access
+          # login page, say). A 3xx is a failure to diagnose, not to follow.
+          HTTP_CODE=$(curl -sS -o /tmp/resp.json -D /tmp/resp.hdr -w "%{http_code}" \
             -X POST "$DOKPLOY_URL/api/compose.deploy" \
             -H "x-api-key: $DOKPLOY_TOKEN" \
             -H "Content-Type: application/json" \
@@ -171,11 +185,26 @@ jobs:
 
           if [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 300 ]; then
             echo "✅ Compose deploy queued"
-          else
-            echo "::error::Dokploy API returned HTTP $HTTP_CODE"
-            cat /tmp/resp.json
+            exit 0
+          fi
+
+          if [ "$HTTP_CODE" -ge 300 ] && [ "$HTTP_CODE" -lt 400 ]; then
+            LOCATION=$(grep -i '^location:' /tmp/resp.hdr | head -1 | cut -d' ' -f2- | tr -d '\r' || true)
+            SERVER=$(grep -i '^server:' /tmp/resp.hdr | head -1 | cut -d' ' -f2- | tr -d '\r' || true)
+            echo "Redirect target: ${LOCATION:-<none>}"
+            echo "Answered by:     ${SERVER:-<unknown>}"
+            case "$LOCATION" in
+              *cdn-cgi/access*)
+                echo "::error::Cloudflare Access is protecting this hostname and redirected the API call to its login page. Either add a bypass policy for /api/* , or issue an Access service token and send CF-Access-Client-Id / CF-Access-Client-Secret alongside x-api-key." ;;
+              *)
+                echo "::error::Dokploy API returned HTTP $HTTP_CODE instead of reaching the API. A proxy in front of Dokploy answered. Check DOKPLOY_URL points at the Dokploy host with no trailing slash or path, and that nothing (Cloudflare Access, an auth proxy, a redirect rule) sits in front of /api/." ;;
+            esac
             exit 1
           fi
+
+          echo "::error::Dokploy API returned HTTP $HTTP_CODE"
+          cat /tmp/resp.json
+          exit 1
 
       - name: Job summary
         env:
