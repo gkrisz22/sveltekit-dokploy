@@ -194,12 +194,12 @@
 		<ol>
 			<li>
 				<strong>Create Compose in Dokploy</strong> — Project → Create Service → <code>Compose</code> → Source
-				<code>Git</code> → repo <code>your-org/sveltekit-dokploy</code>, Branch <code>main</code>, Compose
+				<code>Git</code> → repo <code>gkrisz22/sveltekit-dokploy</code>, Branch <code>main</code>, Compose
 				File <code>./docker-compose.yml</code>.
 			</li>
 			<li>
 				<strong>Set image in compose</strong> — In repo edit <code>docker-compose.yml</code>:
-				<code>image: ghcr.io/YOUR_ORG/sveltekit-dokploy:latest</code> (lowercase, matches
+				<code>image: ghcr.io/gkrisz22/sveltekit-dokploy:latest</code> (lowercase, matches
 				<code>github.repository</code>). CI pushes <code>:latest</code> + <code>:sha</code>.
 			</li>
 			<li>

@@ -4,10 +4,9 @@
 # Dokploy expects this file at the repo root; set Compose File = ./docker-compose.yml in the UI.
 services:
   app:
-    # IMPORTANT: replace `ghcr.io/OWNER/sveltekit-dokploy` with your repo's image
-    # e.g. ghcr.io/myorg/sveltekit-dokploy
+    # Must match what CI pushes: ghcr.io/<owner>/<repo>, lowercase.
     # CI pushes :latest and :<sha>; Dokploy always pulls :latest via pull_policy.
-    image: ghcr.io/OWNER/sveltekit-dokploy:latest
+    image: ghcr.io/gkrisz22/sveltekit-dokploy:latest
     pull_policy: always
     # No `container_name:` -- it would force compose to stop the old container
     # before starting the new one (extra downtime on every deploy) and would

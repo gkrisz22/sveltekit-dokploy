@@ -2,7 +2,7 @@
 # ==========================================================================
 # Purpose: `docker stack deploy -c docker-stack.yml sveltekit --with-registry-auth`
 #          for SvelteKit (adapter-node) + nginx on :80. Same image as Compose
-#          (ghcr.io/OWNER/sveltekit-dokploy) built by CI, fetched via
+#          (ghcr.io/gkrisz22/sveltekit-dokploy) built by CI, fetched via
 #          `pull_policy` equivalent in Swarm. Traefik/Swarm provides :443 TLS;
 #          container only exposes 80.
 #
@@ -21,7 +21,7 @@
 #   # if image is private GHCR, login on all swarm nodes first, then:
 #   docker stack deploy -c docker-stack.yml sveltekit --with-registry-auth --prune
 #   # update (zero-downtime): push new :latest to GHCR then
-#   docker service update --image ghcr.io/OWNER/sveltekit-dokploy:latest sveltekit_app
+#   docker service update --image ghcr.io/gkrisz22/sveltekit-dokploy:latest sveltekit_app
 #   # or re-deploy stack (same command) — Swarm diffs and rolls with update_config
 #   docker stack deploy -c docker-stack.yml sveltekit --with-registry-auth
 #   # status
@@ -47,10 +47,9 @@
 
 services:
   app:
-    # IMPORTANT: replace with your repo image (lowercase)
-    # e.g. ghcr.io/myorg/sveltekit-dokploy
+    # Must match what CI pushes: ghcr.io/<owner>/<repo>, lowercase.
     # CI pushes :latest and :<sha>; stack re-deploy pulls latest.
-    image: ghcr.io/OWNER/sveltekit-dokploy:latest
+    image: ghcr.io/gkrisz22/sveltekit-dokploy:latest
 
     # Swarm ignores `container_name`, `restart`, `build`, `pull_policy`.
     # Use `deploy.*` instead.

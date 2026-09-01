@@ -64,12 +64,12 @@ docker compose -f docker-compose.yml -f docker-compose.local.yml up --build
 
 # Compose — production image (as Dokploy runs, no host port)
 # First push an image to GHCR or build locally with the prod tag:
-docker build -t ghcr.io/OWNER/sveltekit-dokploy:latest .
+docker build -t ghcr.io/gkrisz22/sveltekit-dokploy:latest .
 docker compose up
 # (no host port — use docker-compose.local.yml for local)
 ```
 
-> **Replace** `ghcr.io/OWNER/sveltekit-dokploy` in `docker-compose.yml` and `docker-compose.local.yml` with your repo’s image, e.g. `ghcr.io/myorg/sveltekit-dokploy` (must be lowercase).
+> The image name is already set to `ghcr.io/gkrisz22/sveltekit-dokploy` in `docker-compose.yml`, `docker-compose.local.yml` and `docker-stack.yml`. If you fork or rename the repo, update all three — it must match `ghcr.io/<owner>/<repo>` in lowercase.
 
 ### Env
 
@@ -98,7 +98,7 @@ Without them, `adapter-node` builds `event.url` from the `Host` header over plai
 ### 1. Create Compose in Dokploy
 
 1. Dokploy dashboard → **Project** → **Create Service** → **Compose**.
-2. **Source Type:** `Git` → select provider/repo `your-org/sveltekit-dokploy` → Branch `main` → **Compose File:** `./docker-compose.yml`.
+2. **Source Type:** `Git` → select provider/repo `gkrisz22/sveltekit-dokploy` → Branch `main` → **Compose File:** `./docker-compose.yml`.
    - Alternatively **Raw** and paste `docker-compose.yml` (not recommended — keep file in repo).
 3. **Domains:** inside the Compose service → select service `app` → **Domains** → Add `demo.example.com` → **HTTPS / Let’s Encrypt** → Save.  
    Dokploy creates Traefik router `443 → app:80` automatically. Port in the UI should be `80`.
@@ -112,7 +112,7 @@ Without them, `adapter-node` builds `event.url` from the `Host` header over plai
 - GitHub → repo → **Packages** → `sveltekit-dokploy` → **Package settings** → **Change visibility** → **Public**. Dokploy can `pull` unauthenticated.
 
 **Option B — Private (recommended for prod):**
-- Dokploy → **Settings** → **Registry** → **Add Registry** → `ghcr.io` → username `OWNER` + PAT (classic) with `read:packages`.  
+- Dokploy → **Settings** → **Registry** → **Add Registry** → `ghcr.io` → username `gkrisz22` + PAT (classic) with `read:packages`.  
   Or configure a GHCR PAT on the host’s `~/.docker/config.json` (Dokploy will use it for `compose pull`).
 - Ensure the workflow’s `GITHUB_TOKEN` has `packages: write` (already set under `permissions:` in `deploy.yml`).
 
@@ -144,20 +144,9 @@ No extra secrets needed for GHCR — `GITHUB_TOKEN` is auto-provided.
 Optional variable for post-deploy health poll:
 - `vars.APP_URL` = `https://demo.example.com` — the `healthcheck` job in `deploy.yml` is gated on `if: vars.APP_URL != ''` and is skipped until you set it.
 
-### 6. Update image name in repo
+### 6. Image name
 
-Edit the `image:` line in `docker-compose.yml`:
-```yaml
-image: ghcr.io/YOUR_ORG/sveltekit-dokploy:latest
-```
-and `docker-compose.local.yml` similarly. Must be lowercase and match `github.repository`.
-
-Commit:
-```sh
-git add docker-compose.yml docker-compose.local.yml
-git commit -m "chore: set GHCR image name"
-git push origin main
-```
+Already set to `ghcr.io/gkrisz22/sveltekit-dokploy` in `docker-compose.yml`, `docker-compose.local.yml` and `docker-stack.yml`. Nothing to do unless you fork or rename the repo.
 
 ### 7. Push — CI builds, pushes, and deploys
 
