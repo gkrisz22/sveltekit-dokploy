@@ -1,0 +1,231 @@
+name: Build & Deploy (Compose + GHCR → Dokploy)
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: dokploy-compose
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  check:
+    name: Typecheck & build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      # head_commit is null on workflow_dispatch, which would bake an empty
+      # BUILD_TIME over the Dockerfile's `unknown` default. Fall back to now.
+      - name: Resolve BUILD_TIME
+        id: buildmeta
+        env:
+          COMMIT_TS: ${{ github.event.head_commit.timestamp }}
+        run: echo "time=${COMMIT_TS:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}" >> "$GITHUB_OUTPUT"
+
+      - run: npm ci
+      - run: npm run check
+      - run: npm run build
+        env:
+          GIT_COMMIT_SHA: ${{ github.sha }}
+          GIT_BRANCH: ${{ github.ref_name }}
+          BUILD_TIME: ${{ steps.buildmeta.outputs.time }}
+
+  build-and-push:
+    name: Build & push image to GHCR
+    runs-on: ubuntu-latest
+    needs: check
+    if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
+    outputs:
+      image: ${{ steps.meta.outputs.tags }}
+      digest: ${{ steps.build.outputs.digest }}
+      # Lowercased image path — `github.repository` keeps the case it was
+      # registered with, but GHCR only accepts lowercase.
+      image_ref: ${{ steps.repo.outputs.image }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve image name & build time
+        id: repo
+        env:
+          REPO: ${{ github.repository }}
+          COMMIT_TS: ${{ github.event.head_commit.timestamp }}
+        run: |
+          echo "image=ghcr.io/${REPO,,}" >> "$GITHUB_OUTPUT"
+          echo "time=${COMMIT_TS:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Docker meta
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.repo.outputs.image }}
+          # `type=sha,format=long,prefix=` publishes the bare 40-char commit
+          # SHA, so the `:<sha>` tag the README and demo page advertise for
+          # rollback actually exists. The default `type=sha` would publish
+          # `sha-<short>` instead, and nothing would match `:${{ github.sha }}`.
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha,format=long,prefix=
+            type=ref,event=branch
+          labels: |
+            org.opencontainers.image.title=sveltekit-dokploy
+            org.opencontainers.image.description=SvelteKit + nginx on :80 (Dokploy/Traefik TLS)
+
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          platforms: linux/amd64
+          build-args: |
+            GIT_COMMIT_SHA=${{ github.sha }}
+            GIT_BRANCH=${{ github.ref_name }}
+            BUILD_TIME=${{ steps.repo.outputs.time }}
+          provenance: false
+
+      - name: Summary
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          echo "### Image pushed 🚀" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Tags:" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "$TAGS" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "Digest: \`$DIGEST\`" >> $GITHUB_STEP_SUMMARY
+
+  deploy:
+    name: Trigger Dokploy Compose deploy
+    runs-on: ubuntu-latest
+    needs: build-and-push
+    steps:
+      # Secrets and repo variables are read through `env:`, never interpolated
+      # into the script body with ${{ }} — an expression is substituted into the
+      # shell source before it runs, so a value containing shell metacharacters
+      # would execute as code on the runner.
+      - name: Validate secrets
+        env:
+          DOKPLOY_URL: ${{ secrets.DOKPLOY_URL }}
+          DOKPLOY_TOKEN: ${{ secrets.DOKPLOY_TOKEN }}
+          DOKPLOY_COMPOSE_ID: ${{ secrets.DOKPLOY_COMPOSE_ID }}
+        run: |
+          if [ -z "$DOKPLOY_URL" ]; then echo "::error::Missing secret DOKPLOY_URL (e.g. https://dokploy.example.com)"; exit 1; fi
+          if [ -z "$DOKPLOY_TOKEN" ]; then echo "::error::Missing secret DOKPLOY_TOKEN (Dokploy → Profile → API Tokens)"; exit 1; fi
+          if [ -z "$DOKPLOY_COMPOSE_ID" ]; then echo "::error::Missing secret DOKPLOY_COMPOSE_ID (Dokploy compose URL: /dashboard/project/<projectId>/services/compose/<composeId> or via GET /api/compose.all)"; exit 1; fi
+
+      - name: Deploy via Dokploy API (compose.deploy)
+        env:
+          DOKPLOY_URL: ${{ secrets.DOKPLOY_URL }}
+          DOKPLOY_TOKEN: ${{ secrets.DOKPLOY_TOKEN }}
+          DOKPLOY_COMPOSE_ID: ${{ secrets.DOKPLOY_COMPOSE_ID }}
+          IMAGE_REF: ${{ needs.build-and-push.outputs.image_ref }}
+          COMMIT_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          DOKPLOY_URL="${DOKPLOY_URL%/}"
+          echo "→ Triggering compose deploy $DOKPLOY_COMPOSE_ID at $DOKPLOY_URL"
+          echo "  Image: $IMAGE_REF:$COMMIT_SHA"
+          echo "  Note: Dokploy will run 'docker compose pull && docker compose up -d' — ensure compose file uses image: $IMAGE_REF:latest (or :$COMMIT_SHA) and registry is accessible."
+
+          HTTP_CODE=$(curl -sS -o /tmp/resp.json -w "%{http_code}" \
+            -X POST "$DOKPLOY_URL/api/compose.deploy" \
+            -H "x-api-key: $DOKPLOY_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "{\"composeId\":\"$DOKPLOY_COMPOSE_ID\"}" \
+            --fail-with-body || true)
+
+          echo "HTTP $HTTP_CODE"
+          cat /tmp/resp.json || true
+          echo ""
+
+          if [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 300 ]; then
+            echo "✅ Compose deploy queued"
+          else
+            echo "::error::Dokploy API returned HTTP $HTTP_CODE"
+            cat /tmp/resp.json
+            exit 1
+          fi
+
+      - name: Job summary
+        env:
+          DOKPLOY_URL: ${{ secrets.DOKPLOY_URL }}
+          DOKPLOY_COMPOSE_ID: ${{ secrets.DOKPLOY_COMPOSE_ID }}
+          IMAGE_REF: ${{ needs.build-and-push.outputs.image_ref }}
+          COMMIT_SHA: ${{ github.sha }}
+          BRANCH: ${{ github.ref_name }}
+        run: |
+          echo "### Dokploy Compose deploy queued 🚀" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **Commit:** \`$COMMIT_SHA\` (\`$BRANCH\`)" >> $GITHUB_STEP_SUMMARY
+          echo "- **Image:** \`$IMAGE_REF:latest\` + \`:$COMMIT_SHA\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Compose:** \`$DOKPLOY_COMPOSE_ID\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Dokploy:** \`$DOKPLOY_URL\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Dokploy will pull the new image (pull_policy: always) and recreate the service." >> $GITHUB_STEP_SUMMARY
+          echo "Check Dokploy dashboard → Compose → Deployments/logs." >> $GITHUB_STEP_SUMMARY
+
+  healthcheck:
+    name: Verify /api/health
+    runs-on: ubuntu-latest
+    needs: deploy
+    if: vars.APP_URL != ''
+    steps:
+      - name: Wait for Dokploy rollout
+        env:
+          APP_URL: ${{ vars.APP_URL }}
+        run: |
+          echo "⏳ Waiting 45s for Dokploy to pull & start..."
+          sleep 45
+          echo "→ Checking $APP_URL/api/health"
+
+      - name: Poll /api/health
+        env:
+          APP_URL: ${{ vars.APP_URL }}
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 12); do
+            echo "Attempt $i/12 — $APP_URL/api/health"
+            if curl -fsS "$APP_URL/api/health" | grep -q '"status":"ok"'; then
+              echo "✅ Healthy"
+              curl -s "$APP_URL/api/health" | jq . || curl -s "$APP_URL/api/health"
+              echo "✅ Healthcheck passed — querying /api/info"
+              curl -s "$APP_URL/api/info" | jq . || true
+              exit 0
+            fi
+            echo "  not ready, sleeping 10s..."
+            sleep 10
+          done
+          echo "::error::Health check failed after 165s (45s wait + 12*10s)"
+          echo "Check Dokploy deployments and: curl -i $APP_URL/api/health"
+          exit 1

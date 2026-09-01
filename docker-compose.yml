@@ -1,0 +1,53 @@
+# Production compose — used by Dokploy
+# Dokploy will `docker compose pull` this image (built & pushed by CI to GHCR)
+# then Traefik routes 443 -> 80 (container). Do NOT publish host ports here — Traefik handles TLS.
+# Dokploy expects this file at the repo root; set Compose File = ./docker-compose.yml in the UI.
+services:
+  app:
+    # IMPORTANT: replace `ghcr.io/OWNER/sveltekit-dokploy` with your repo's image
+    # e.g. ghcr.io/myorg/sveltekit-dokploy
+    # CI pushes :latest and :<sha>; Dokploy always pulls :latest via pull_policy.
+    image: ghcr.io/OWNER/sveltekit-dokploy:latest
+    pull_policy: always
+    # No `container_name:` -- it would force compose to stop the old container
+    # before starting the new one (extra downtime on every deploy) and would
+    # collide if this stack is ever deployed twice on the same host.
+    restart: unless-stopped
+    expose:
+      - "80"
+    environment:
+      NODE_ENV: production
+      # adapter-node reads PORT/HOST
+      PORT: 3000
+      HOST: 0.0.0.0
+      # Traefik terminates TLS and nginx forwards the original scheme/host.
+      # Without these, adapter-node builds `event.url` from the Host header over
+      # plain HTTP, so `url.origin` is http:// while the browser sends an
+      # https:// Origin -- SvelteKit then rejects every POST form action with
+      # "Cross-site POST form submissions are forbidden".
+      # Alternatively pin a single origin: ORIGIN: https://demo.example.com
+      PROTOCOL_HEADER: x-forwarded-proto
+      HOST_HEADER: x-forwarded-host
+      ADDRESS_HEADER: x-forwarded-for
+      # Hops that set XFF before the app: Traefik, then nginx.
+      XFF_DEPTH: 2
+      # Build metadata — baked at build time, but can be overridden at runtime
+      GIT_COMMIT_SHA: ${GIT_COMMIT_SHA:-unknown}
+      GIT_BRANCH: ${GIT_BRANCH:-unknown}
+      BUILD_TIME: ${BUILD_TIME:-unknown}
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:80/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    # No `ports:` here — Dokploy/Traefik exposes the service via the domain you add in the UI.
+    # If you need local ports, use `docker compose -f docker-compose.yml -f docker-compose.local.yml up`.
+
+# Optional: if Dokploy's compose isolation uses a custom network, it will be created automatically.
+# You can define networks/volumes here if needed.
+
+# Notes for GHCR auth:
+# - If the image is PUBLIC on GHCR, Dokploy can pull unauthenticated.
+# - If PRIVATE: Dokploy → Settings → Registry → Add ghcr.io credentials (PAT or GITHUB_TOKEN),
+#   or add a `.env` with GHCR credentials and set `image:` to use authenticated pull via Docker config.

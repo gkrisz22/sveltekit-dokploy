@@ -1,0 +1,22 @@
+# Local override — adds build + host port for `docker compose -f docker-compose.yml -f docker-compose.local.yml up --build`
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.local.yml up --build
+#   # or with specific image tag:
+#   IMAGE_NAME=ghcr.io/OWNER/sveltekit-dokploy:local docker compose -f docker-compose.yml -f docker-compose.local.yml up --build
+#   open http://localhost:8080
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        GIT_COMMIT_SHA: ${GIT_COMMIT_SHA:-local}
+        GIT_BRANCH: ${GIT_BRANCH:-local}
+        BUILD_TIME: ${BUILD_TIME:-unknown}
+    # Override image for local testing (optional)
+    image: ${IMAGE_NAME:-ghcr.io/OWNER/sveltekit-dokploy:local}
+    # Publish nginx 80 to host 8080 for local validation (Dokploy prod compose does NOT publish)
+    ports:
+      - "${HOST_PORT:-8080}:80"
+    # Ensure we use local env, not GHCR pull
+    pull_policy: build

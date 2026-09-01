@@ -1,0 +1,191 @@
+# docker-stack.yml — Swarm stack with zero-downtime rolling updates
+# ==========================================================================
+# Purpose: `docker stack deploy -c docker-stack.yml sveltekit --with-registry-auth`
+#          for SvelteKit (adapter-node) + nginx on :80. Same image as Compose
+#          (ghcr.io/OWNER/sveltekit-dokploy) built by CI, fetched via
+#          `pull_policy` equivalent in Swarm. Traefik/Swarm provides :443 TLS;
+#          container only exposes 80.
+#
+# Zero-downtime strategy:
+#   1) healthcheck gates rollout — Swarm waits until new task is healthy
+#   2) update_config.order: start-first — new container starts BEFORE old stops
+#      (so at least N tasks stay available)
+#   3) parallelism: 1 + delay — one replica at a time, with settle window
+#   4) rollback_config — auto-rollback on failure
+#   5) restart_policy + stop_grace_period — graceful SIGTERM handling
+#      (docker-entrypoint.sh traps SIGTERM, stops nginx/node cleanly)
+#
+# Deploy:
+#   # init swarm if needed (single node is fine)
+#   docker swarm init
+#   # if image is private GHCR, login on all swarm nodes first, then:
+#   docker stack deploy -c docker-stack.yml sveltekit --with-registry-auth --prune
+#   # update (zero-downtime): push new :latest to GHCR then
+#   docker service update --image ghcr.io/OWNER/sveltekit-dokploy:latest sveltekit_app
+#   # or re-deploy stack (same command) — Swarm diffs and rolls with update_config
+#   docker stack deploy -c docker-stack.yml sveltekit --with-registry-auth
+#   # status
+#   docker service ps sveltekit_app --no-trunc
+#   docker stack ps sveltekit
+#   # logs
+#   docker service logs -f sveltekit_app
+#   # remove
+#   docker stack rm sveltekit
+#
+# GHCR:
+#   Public: no auth needed. Private: `docker login ghcr.io` on each node or
+#   pass --with-registry-auth (forwards your local auth to nodes).
+#   Dokploy users: this stack is for raw Swarm, not Dokploy Compose.
+#
+# Traefik (Swarm) vs. plain ports:
+#   - With Traefik (recommended): uncomment deploy.labels below, set
+#     networks.web.external=true, and REMOVE `ports:` — Traefik routes
+#     via overlay network (Host rule → service VIP on 80).
+#   - Without Traefik: keep `ports:` as below; Swarm's ingress mesh
+#     load-balances 80 → tasks. For TLS, terminate at external LB.
+# ==========================================================================
+
+services:
+  app:
+    # IMPORTANT: replace with your repo image (lowercase)
+    # e.g. ghcr.io/myorg/sveltekit-dokploy
+    # CI pushes :latest and :<sha>; stack re-deploy pulls latest.
+    image: ghcr.io/OWNER/sveltekit-dokploy:latest
+
+    # Swarm ignores `container_name`, `restart`, `build`, `pull_policy`.
+    # Use `deploy.*` instead.
+
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      HOST: 0.0.0.0
+      # Required behind a TLS-terminating proxy -- see docker-compose.yml.
+      PROTOCOL_HEADER: x-forwarded-proto
+      HOST_HEADER: x-forwarded-host
+      ADDRESS_HEADER: x-forwarded-for
+      XFF_DEPTH: 2
+      # baked at build time (Dockerfile ARG), overridable at deploy
+      GIT_COMMIT_SHA: ${GIT_COMMIT_SHA:-unknown}
+      GIT_BRANCH: ${GIT_BRANCH:-unknown}
+      BUILD_TIME: ${BUILD_TIME:-unknown}
+
+    networks:
+      - web
+
+    # Allow graceful shutdown (SvelteKit / nginx get SIGTERM)
+    stop_grace_period: 30s
+
+    # Healthcheck is the gate for rolling updates — task must be healthy
+    # before Swarm proceeds to next replica.
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:80/api/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+    # Plain Swarm publish — comment out if using Traefik labels below
+    ports:
+      - target: 80
+        published: 80
+        protocol: tcp
+        mode: ingress
+      # For host-mode (no ingress mesh, per-node): mode: host
+      # Swarm will route only to nodes where task runs.
+
+    deploy:
+      mode: replicated
+      replicas: 3
+
+      # VIP: Swarm's internal LB (vs DNSRR). Traefik and `ports:`
+      # both use VIP. Keep `vip` for zero-downtime + session affinity.
+      endpoint_mode: vip
+
+      # Zero-downtime: start new task first, wait for health, then stop old
+      update_config:
+        parallelism: 1
+        delay: 15s
+        order: start-first
+        failure_action: rollback
+        monitor: 30s
+        max_failure_ratio: 0.3
+
+      rollback_config:
+        parallelism: 1
+        delay: 10s
+        order: start-first
+        failure_action: pause
+        monitor: 30s
+
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+        window: 120s
+
+      resources:
+        limits:
+          cpus: "0.50"
+          memory: 512M
+        reservations:
+          cpus: "0.25"
+          memory: 256M
+
+      # Placement: uncomment to constrain to swarm managers/workers
+      # placement:
+      #   constraints:
+      #     - node.role == worker
+      #   preferences:
+      #     - spread: node.labels.zone
+
+      labels:
+        # Plain labels for external monitoring; not Traefik by default
+        - "com.sveltekit.description=SvelteKit + nginx :80 (Swarm zero-downtime)"
+
+        # ── Traefik on Swarm (uncomment block if Traefik is your edge) ──
+        # Requires: external overlay `web` already created by Traefik stack
+        # (e.g. `docker network create --driver overlay --attachable web`)
+        # and Traefik deployed with `swarmMode: true` and providers.docker.swarmMode=true
+        # Then set networks.web.external=true below and comment `ports:` above.
+        # - "traefik.enable=true"
+        # - "traefik.docker.network=web"
+        # - "traefik.http.routers.sveltekit.rule=Host(`example.com`)"
+        # - "traefik.http.routers.sveltekit.entrypoints=websecure"
+        # - "traefik.http.routers.sveltekit.tls=true"
+        # - "traefik.http.routers.sveltekit.tls.certresolver=letsencrypt"
+        # - "traefik.http.services.sveltekit.loadbalancer.server.port=80"
+        # - "traefik.http.services.sveltekit.loadbalancer.healthcheck.path=/api/health"
+        # - "traefik.http.services.sveltekit.loadbalancer.healthcheck.interval=10s"
+        # - "traefik.http.services.sveltekit.loadbalancer.healthcheck.timeout=3s"
+
+      # If you need per-replica hostname or extra hosts, add here
+      # hosts: not needed
+
+    # Configs/secrets example (for external nginx.conf or env):
+    # configs:
+    #   - source: nginx_conf
+    #     target: /etc/nginx/nginx.conf
+
+networks:
+  web:
+    driver: overlay
+    attachable: true
+    # If Traefik already created `web`:
+    # external: true
+    # name: web
+    # For Dokploy: use its network name if integrating:
+    # external: true
+    # name: dokploy-network
+
+# Optional: mount custom nginx.conf without baking into image
+# configs:
+#   nginx_conf:
+#     file: ./nginx.conf
+# # or external:
+# #   nginx_conf:
+# #     external: true
+
+# Optional: registry auth as Swarm config (alternative to --with-registry-auth)
+# secrets:
+#   ghcr_token:
+#     external: true
